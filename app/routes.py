@@ -2,6 +2,16 @@ from typing import Optional
 from datetime import datetime, timedelta
 import hashlib
 import secrets
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
+
+import httpx
+
+from .pinned_transport import PinnedIPTransport
+
+from pydantic import HttpUrl
+from bs4 import BeautifulSoup
 
 from fastapi import (
     APIRouter,
@@ -38,6 +48,8 @@ from .auth import (
 from .main import limiter
 
 router = APIRouter()
+
+MAX_REDIRECTS = 5
 
 security = HTTPBearer()
 
@@ -175,6 +187,67 @@ def get_current_user(
 
     return current_user
 
+def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        HTTPBearer(auto_error=False)
+    ),
+    db: Session = Depends(get_db),
+) -> User | None:
+    if credentials is None:
+        return None
+
+    payload = decode_access_token(credentials.credentials)
+
+    if payload is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+        )
+
+    user_id = payload.get("user_id")
+
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token payload",
+        )
+
+    current_user = (
+        db.query(User)
+        .filter(User.id == user_id)
+        .first()
+    )
+
+    if current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found",
+        )
+
+    return current_user
+
+def get_owned_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Note:
+    note = (
+        db.query(Note)
+        .filter(
+            Note.id == note_id,
+            Note.owner_id == current_user.id,
+        )
+        .first()
+    )
+
+    if note is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Note not found",
+        )
+
+    return note
+
 @router.get("/me", response_model=UserResponse)
 def me(
     current_user: User = Depends(get_current_user),
@@ -220,6 +293,255 @@ def create_note(
     db.refresh(new_note)
 
     return new_note
+
+def validate_preview_url(url: str):
+    parsed = urlparse(url)
+
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only http and https URLs are allowed",
+        )
+
+    if not parsed.hostname:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL",
+        )
+
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+addresses = socket.getaddrinfo(
+    parsed.hostname,
+    port,
+    type=socket.SOCK_STREAM,
+)
+
+    except socket.gaierror:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to resolve hostname",
+        )
+
+    ips = {
+        ipaddress.ip_address(address[4][0])
+        for address in addresses
+    }
+
+    for ip in ips:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Destination address is not allowed",
+            )
+
+    return parsed, ips
+
+MAX_REDIRECTS = 5
+MAX_PREVIEW_SIZE = 1 * 1024 * 1024  # 1 MiB
+
+
+@router.post("/preview")
+async def preview(url: HttpUrl):
+    current_url = str(url)
+
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed, ips = validate_preview_url(current_url)
+
+        response_status = None
+        response_headers = {}
+        response_body = bytearray()
+
+        for ip in ips:
+            try:
+                transport = PinnedIPTransport(
+                    verified_ip=str(ip)
+                )
+
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    timeout=10.0,
+                    follow_redirects=False,
+                ) as client:
+
+                    async with client.stream(
+                        "GET",
+                        current_url,
+                    ) as response:
+
+                        response_status = response.status_code
+                        response_headers = response.headers
+
+                        if response_status in {
+                            301,
+                            302,
+                            303,
+                            307,
+                            308,
+                        }:
+                            # Для redirect тело нам не нужно.
+                            pass
+
+                        else:
+                            content_type = response.headers.get(
+                                "content-type",
+                                "",
+                            ).lower()
+
+                            if not (
+                                content_type.startswith("text/html")
+                                or content_type.startswith(
+                                    "application/xhtml+xml"
+                                )
+                            ):
+                                raise HTTPException(
+                                    status_code=502,
+                                    detail="Unsupported upstream content type",
+                                )
+
+                            async for chunk in response.aiter_bytes(
+                                chunk_size=64 * 1024
+                            ):
+                                if (
+                                    len(response_body)
+                                    + len(chunk)
+                                    > MAX_PREVIEW_SIZE
+                                ):
+                                    raise HTTPException(
+                                        status_code=502,
+                                        detail="Upstream response body is too large",
+                                    )
+
+                                response_body.extend(chunk)
+
+                break
+
+            except (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+            ):
+                continue
+
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail="Unable to connect to destination",
+            )
+
+        if response_status in {
+            301,
+            302,
+            303,
+            307,
+            308,
+        }:
+            location = response_headers.get("location")
+
+            if not location:
+                break
+
+            current_url = urljoin(
+                current_url,
+                location,
+            )
+            continue
+
+        break
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Too many redirects",
+        )
+
+    html = bytes(response_body).decode(
+        "utf-8",
+        errors="replace",
+    )
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
+
+    title = (
+        soup.title.string
+        if soup.title
+        else None
+    )
+
+    description_tag = soup.find(
+        "meta",
+        attrs={"name": "description"},
+    )
+
+    description = (
+        description_tag.get("content")
+        if description_tag
+        else None
+    )
+
+    return {
+        "title": title,
+        "description": description,
+    }
+
+@router.patch(
+    "/notes/{note_id}",
+    response_model=NoteResponse,
+)
+def update_note(
+    note_id: int,
+    note: NoteUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    existing_note = (
+        db.query(Note)
+        .filter(
+            Note.id == note_id,
+            Note.owner_id == current_user.id,
+        )
+        .first()
+    )
+
+    if existing_note is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Note not found",
+        )
+
+    if (
+        note.title is None
+        and note.content is None
+        and note.is_public is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="No fields to update",
+        )
+
+    if note.title is not None:
+        existing_note.title = note.title
+
+    if note.content is not None:
+        existing_note.content = note.content
+
+    if note.is_public is not None:
+        existing_note.is_public = note.is_public
+
+    db.commit()
+    db.refresh(existing_note)
+
+    return existing_note  
 
 @router.post(
     "/notes/{note_id}/share",
@@ -338,46 +660,50 @@ def get_shared_note(
 
     return note
 
-@router.put(
+@router.get(
     "/notes/{note_id}",
     response_model=NoteResponse,
 )
-def update_note(
+def get_note(
     note_id: int,
-    note_update: NoteUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_optional_current_user),
 ):
-    # Ищем заметку только среди заметок
-    # текущего пользователя
-    note = (
-        db.query(Note)
-        .filter(
-            Note.id == note_id,
-            Note.owner_id == current_user.id,
+    # 1. Анонимный пользователь:
+    # может получить только публичную заметку.
+    if current_user is None:
+        note = (
+            db.query(Note)
+            .filter(
+                Note.id == note_id,
+                Note.is_public == True,
+            )
+            .first()
         )
-        .first()
-    )
 
-    # Если заметка не существует
-    # или принадлежит другому пользователю,
-    # возвращаем одинаковый ответ
+    # 2. Авторизованный пользователь:
+    # владелец может получить свою заметку,
+    # а любой другой пользователь — только публичную.
+    else:
+        note = (
+            db.query(Note)
+            .filter(
+                Note.id == note_id,
+                or_(
+                    Note.owner_id == current_user.id,
+                    Note.is_public == True,
+                ),
+            )
+            .first()
+        )
+
+    # Если заметка не найдена или доступ запрещён —
+    # возвращаем одинаковый 404.
     if note is None:
         raise HTTPException(
             status_code=404,
             detail="Note not found",
         )
-
-    # Обновляем title, если его передали
-    if note_update.title is not None:
-        note.title = note_update.title
-
-    # Обновляем content, если его передали
-    if note_update.content is not None:
-        note.content = note_update.content
-
-    db.commit()
-    db.refresh(note)
 
     return note
 
@@ -464,22 +790,32 @@ def search_notes(
     "/notes/{note_id}",
     response_model=NoteResponse,
 )
-def get_note(
+def get_note_by_id(
     note_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_optional_current_user),
 ):
-    note = (
-        db.query(Note)
-        .filter(
-            Note.id == note_id,
-            or_(
-                Note.owner_id == current_user.id,
+    if current_user is None:
+        note = (
+            db.query(Note)
+            .filter(
+                Note.id == note_id,
                 Note.is_public == True,
-            ),
+            )
+            .first()
         )
-        .first()
-    )
+    else:
+        note = (
+            db.query(Note)
+            .filter(
+                Note.id == note_id,
+                or_(
+                    Note.owner_id == current_user.id,
+                    Note.is_public == True,
+                ),
+            )
+            .first()
+        )
 
     if note is None:
         raise HTTPException(
@@ -491,26 +827,9 @@ def get_note(
 
 @router.delete("/notes/{note_id}", status_code=204)
 def delete_note(
-    note_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    note: Note = Depends(get_owned_note),
 ):
-
-    note = (
-        db.query(Note)
-        .filter(
-            Note.id == note_id,
-            Note.owner_id == current_user.id
-        )
-        .first()
-    )
-
-    if note is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Note not found",
-        )
-
     db.delete(note)
     db.commit()
 

@@ -42,6 +42,7 @@ class NoteUpdate(BaseModel):
         max_length=100,
     )
     content: str | None = None
+    is_public: bool | None = None
 
 
 class NoteResponse(BaseModel):

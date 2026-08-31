@@ -49,6 +49,12 @@ class Note(Base):
         back_populates="notes",
     )
 
+    share_tokens = relationship(
+    "ShareToken",
+    back_populates="note",
+    cascade="all, delete-orphan",
+)
+
 
 class ShareToken(Base):
     __tablename__ = "share_tokens"
@@ -70,6 +76,11 @@ class ShareToken(Base):
         nullable=False,
         index=True,
     )
+
+    note = relationship(
+    "Note",
+    back_populates="share_tokens",
+)
 
     # Кто создал ссылку
     created_by = Column(
