@@ -3,8 +3,6 @@ from sqlalchemy import (
     Integer,
     String,
     DateTime,
-    Boolean,
-    Text,
     ForeignKey,
 )
 from sqlalchemy.orm import relationship
@@ -15,89 +13,131 @@ from .database import Base
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-
-    failed_attempts = Column(Integer, default=0, nullable=False)
-    locked_until = Column(DateTime, nullable=True)
-
-    notes = relationship(
-        "Note",
-        back_populates="owner",
-        cascade="all, delete-orphan",
-    )
-
-
-class Note(Base):
-    __tablename__ = "notes"
-
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    created_at = Column(DateTime, nullable=False)
-    is_public = Column(Boolean, default=False, nullable=False)
-
-    owner_id = Column(
+    id = Column(
         Integer,
-        ForeignKey("users.id"),
-        nullable=False,
+        primary_key=True,
+        index=True,
     )
 
-    owner = relationship(
-        "User",
-        back_populates="notes",
-    )
-
-    share_tokens = relationship(
-    "ShareToken",
-    back_populates="note",
-    cascade="all, delete-orphan",
-)
-
-
-class ShareToken(Base):
-    __tablename__ = "share_tokens"
-
-    id = Column(Integer, primary_key=True, index=True)
-
-    # Храним НЕ сам токен, а его SHA-256
-    token_hash = Column(
-        String(64),
+    username = Column(
+        String,
         unique=True,
         nullable=False,
         index=True,
     )
 
-    # К какой заметке относится ссылка
-    note_id = Column(
+    hashed_password = Column(
+        String,
+        nullable=False,
+    )
+
+    failed_attempts = Column(
         Integer,
-        ForeignKey("notes.id"),
+        default=0,
+        nullable=False,
+    )
+
+    locked_until = Column(
+        DateTime,
+        nullable=True,
+    )
+
+    profile = relationship(
+        "Profile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    skins = relationship(
+        "Skin",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+
+
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        unique=True,
+        nullable=False,
+    )
+
+    level = Column(
+        Integer,
+        default=1,
+        nullable=False,
+    )
+
+    kills = Column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+
+    deaths = Column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+
+    matches = Column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+
+    user = relationship(
+        "User",
+        back_populates="profile",
+    )
+
+
+class Skin(Base):
+    __tablename__ = "skins"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    name = Column(String, nullable=False)
+    weapon = Column(String, nullable=False)
+    rarity = Column(String, nullable=False)
+
+    owner_id = Column(
+        Integer,
+        ForeignKey("users.id"),
         nullable=False,
         index=True,
     )
 
-    note = relationship(
-    "Note",
-    back_populates="share_tokens",
-)
-
-    # Кто создал ссылку
-    created_by = Column(
-        Integer,
-        ForeignKey("users.id"),
-        nullable=False,
+    owner = relationship(
+        "User",
+        back_populates="skins",
     )
 
-    # Время окончания действия
+
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    jti = Column(
+        String,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
     expires_at = Column(
         DateTime,
         nullable=False,
     )
 
-    # Можно досрочно отозвать
-    revoked = Column(
-        Boolean,
-        default=False,
-        nullable=False,
-    )

@@ -5,13 +5,13 @@ DATABASE_URL = "sqlite:///./users.db"
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False}
+    connect_args={"check_same_thread": False},
 )
 
 SessionLocal = sessionmaker(
     autoflush=False,
     autocommit=False,
-    bind=engine
+    bind=engine,
 )
 
 Base = declarative_base()
@@ -19,6 +19,7 @@ Base = declarative_base()
 
 def get_db():
     db = SessionLocal()
+
     try:
         yield db
     finally:

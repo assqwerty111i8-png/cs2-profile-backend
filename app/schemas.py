@@ -3,9 +3,22 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+# =========================
+# AUTH
+# =========================
+
 class UserCreate(BaseModel):
-    username: str
-    password: str
+    username: str = Field(
+        ...,
+        min_length=3,
+        max_length=32,
+    )
+
+    password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128,
+    )
 
 
 class UserLogin(BaseModel):
@@ -21,47 +34,74 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
-# ==========================================
-# ЗАМЕТКИ
-# ==========================================
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
 
-class NoteCreate(BaseModel):
-    title: str = Field(
+
+# =========================
+# PROFILE
+# =========================
+
+class ProfileResponse(BaseModel):
+    level: int
+    kills: int
+    deaths: int
+    matches: int
+
+    class Config:
+        from_attributes = True
+
+class PublicProfileResponse(BaseModel):
+    username: str
+    level: int
+    kills: int
+    deaths: int
+    matches: int
+
+# =========================
+# INVENTORY
+# =========================
+
+class SkinCreate(BaseModel):
+    name: str = Field(
         ...,
         min_length=1,
         max_length=100,
     )
-    content: str
-    is_public: bool = False
 
-
-class NoteUpdate(BaseModel):
-    title: str | None = Field(
-        default=None,
+    weapon: str = Field(
+        ...,
         min_length=1,
-        max_length=100,
+        max_length=50,
     )
-    content: str | None = None
-    is_public: bool | None = None
+
+    rarity: str = Field(
+        ...,
+        min_length=1,
+        max_length=30,
+    )
 
 
-class NoteResponse(BaseModel):
+class SkinResponse(BaseModel):
     id: int
-    title: str
-    content: str
-    created_at: datetime
-    is_public: bool
-    owner_id: int
+    name: str
+    weapon: str
+    rarity: str
 
     class Config:
         from_attributes = True
 
 
-# ==========================================
-# ВРЕМЕННЫЙ ДОСТУП
-# ==========================================
 
-class ShareTokenResponse(BaseModel):
-    token: str
-    note_id: int
-    expires_at: datetime
+# =========================
+# LEADERBOARD
+# =========================
+
+class LeaderboardEntry(BaseModel):
+    rank: int
+    username: str
+    level: int
+    kills: int
+    deaths: int
+    matches: int
