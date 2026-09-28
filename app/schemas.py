@@ -82,6 +82,8 @@ class SkinCreate(BaseModel):
         max_length=30,
     )
 
+class SkinTransfer(BaseModel):
+    target_user_id: int
 
 class SkinResponse(BaseModel):
     id: int

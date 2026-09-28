@@ -96,6 +96,12 @@ class Profile(Base):
         nullable=False,
     )
 
+    inventory_count = Column(
+    Integer,
+    default=0,
+    nullable=False,
+)
+
     user = relationship(
         "User",
         back_populates="profile",
