@@ -52,12 +52,14 @@ class ProfileResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
 class PublicProfileResponse(BaseModel):
     username: str
     level: int
     kills: int
     deaths: int
     matches: int
+
 
 # =========================
 # INVENTORY
@@ -82,8 +84,10 @@ class SkinCreate(BaseModel):
         max_length=30,
     )
 
+
 class SkinTransfer(BaseModel):
     target_user_id: int
+
 
 class SkinResponse(BaseModel):
     id: int
@@ -93,7 +97,6 @@ class SkinResponse(BaseModel):
 
     class Config:
         from_attributes = True
-
 
 
 # =========================
@@ -107,3 +110,37 @@ class LeaderboardEntry(BaseModel):
     kills: int
     deaths: int
     matches: int
+
+
+# =========================
+# MATCHES
+# =========================
+
+class MatchCreate(BaseModel):
+    map_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+    )
+
+
+class MatchFinish(BaseModel):
+    # Клиент не передаёт:
+    # kills
+    # deaths
+    # result
+    #
+    # Результат матча определяет сервер.
+    pass
+
+
+class MatchResponse(BaseModel):
+    id: int
+    map_name: str
+    status: str
+    kills: int
+    deaths: int
+    won: int
+
+    class Config:
+        from_attributes = True

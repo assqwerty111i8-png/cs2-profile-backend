@@ -14,6 +14,7 @@ from fastapi.security import (
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case
 
 from .database import get_db
 
@@ -22,6 +23,7 @@ from .models import (
     Profile,
     Skin,
     RevokedToken,
+    Match,
 )
 
 from .schemas import (
@@ -35,6 +37,9 @@ from .schemas import (
     SkinTransfer,
     SkinResponse,
     LeaderboardEntry,
+    MatchCreate,
+    MatchFinish,
+    MatchResponse,
 )
 
 
@@ -661,3 +666,106 @@ def leaderboard(
         )
 
     return result
+
+
+@router.post(
+    "/matches",
+    response_model=MatchResponse,
+)
+@limiter.limit("10/minute")
+def create_match(
+    request: Request,
+    match_data: MatchCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    match = Match(
+        user_id=current_user.id,
+        map_name=match_data.map_name,
+    )
+
+    db.add(match)
+    db.commit()
+    db.refresh(match)
+
+    return match
+
+
+@router.post(
+    "/matches/{match_id}/finish",
+    response_model=MatchResponse,
+)
+@limiter.limit("10/minute")
+def finish_match(
+    request: Request,
+    match_id: int,
+    match_data: MatchFinish,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    match = (
+        db.query(Match)
+        .filter(
+            Match.id == match_id,
+            Match.user_id == current_user.id,
+        )
+        .with_for_update()
+        .first()
+    )
+
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Match not found",
+        )
+
+    # Защита от replay:
+    # повторное завершение ничего не начисляет.
+    if match.completed:
+        raise HTTPException(
+            status_code=409,
+            detail="Match already completed",
+        )
+
+    # ВАЖНО:
+    # kills/deaths НЕ берём из запроса клиента.
+    #
+    # Пока это тестовая логика.
+    # В дальнейшем эти значения должны
+    # приходить из доверенной игровой логики.
+    server_kills = 10
+    server_deaths = 5
+
+    match.kills = server_kills
+    match.deaths = server_deaths
+    match.won = 1 if match_data.result == "win" else 0
+    match.completed = 1
+
+    profile = (
+        db.query(Profile)
+        .filter(Profile.user_id == current_user.id)
+        .with_for_update()
+        .first()
+    )
+
+    if profile is None:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=404,
+            detail="Profile not found",
+        )
+
+    # Статистика изменяется ТОЛЬКО сервером.
+    profile.kills += server_kills
+    profile.deaths += server_deaths
+    profile.matches += 1
+
+    # Простая server-side логика уровня.
+    if profile.matches % 10 == 0:
+        profile.level += 1
+
+    db.commit()
+    db.refresh(match)
+
+    return match
